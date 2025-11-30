@@ -1,0 +1,299 @@
+%% ========================================================================
+%  WIRELESS MEDICAL TELEMETRY SYSTEM - FM MODULATION/DEMODULATION
+%  Educational DSP Simulation for ECG Transmission
+%  Author: Senior DSP Engineer Demonstration
+%  Date: 2025
+%% ========================================================================
+
+clear; close all; clc;
+
+%% ===================== USER INTERACTION ================================
+fprintf('\n╔════════════════════════════════════════════════════════════╗\n');
+fprintf('║   WIRELESS MEDICAL TELEMETRY SYSTEM - FM BASED           ║\n');
+fprintf('║   Real-Time ECG Transmission Simulator                    ║\n');
+fprintf('╚════════════════════════════════════════════════════════════╝\n\n');
+
+fprintf('Select Patient Condition:\n');
+fprintf('  [A] Normal Sinus Rhythm (~70 BPM) - STABLE\n');
+fprintf('  [B] Ventricular Tachycardia (>140 BPM) - CRITICAL\n\n');
+choice = input('Enter your choice (A/B): ', 's');
+
+if strcmpi(choice, 'B')
+    heart_rate = 150; % Emergency case
+    status = 'CRITICAL';
+    color_status = [1 0.2 0.2]; % Red
+    alarm_flag = true;
+else
+    heart_rate = 70; % Normal case
+    status = 'NORMAL';
+    color_status = [0.2 1 0.2]; % Green
+    alarm_flag = false;
+end
+
+fprintf('\n>>> Patient Status: %s | Heart Rate: %d BPM\n', status, heart_rate);
+fprintf('>>> Initializing Telemetry System...\n\n');
+
+%% =================== SIGNAL PARAMETERS =================================
+fs = 2000;              % Sampling frequency (Hz)
+duration = 3;           % Signal duration (seconds)
+t = 0:1/fs:duration-1/fs; % Time vector
+N = length(t);
+
+% FM Modulation Parameters
+fc = 400;               % Carrier frequency (Hz) - Changed to 400 Hz for better visualization
+kf = 50;                % Frequency sensitivity (Hz/V)
+Ac = 1;                 % Carrier amplitude
+
+% Channel Parameters
+SNR_dB = 18;            % Signal-to-Noise Ratio in dB (increased for better recovery)
+
+%% =============== ECG SIGNAL GENERATION (Synthetic) =====================
+% Generate realistic ECG using Gaussian pulses for P, QRS, T waves
+beat_period = 60/heart_rate; % Time between beats (seconds)
+num_beats = floor(duration / beat_period);
+
+ecg_signal = zeros(size(t));
+
+for beat = 0:num_beats-1
+    t_beat = beat * beat_period;
+    
+    % P-wave (atrial depolarization)
+    P_center = t_beat + 0.16;
+    P_width = 0.04;
+    P_amp = 0.15;
+    ecg_signal = ecg_signal + P_amp * exp(-((t - P_center).^2) / (2*P_width^2));
+    
+    % Q-wave (start of ventricular depolarization)
+    Q_center = t_beat + 0.28;
+    Q_width = 0.015;
+    Q_amp = -0.1;
+    ecg_signal = ecg_signal + Q_amp * exp(-((t - Q_center).^2) / (2*Q_width^2));
+    
+    % R-wave (main ventricular depolarization - QRS Complex)
+    R_center = t_beat + 0.3;
+    R_width = 0.02;
+    R_amp = 1.2;
+    ecg_signal = ecg_signal + R_amp * exp(-((t - R_center).^2) / (2*R_width^2));
+    
+    % S-wave (end of ventricular depolarization)
+    S_center = t_beat + 0.32;
+    S_width = 0.02;
+    S_amp = -0.2;
+    ecg_signal = ecg_signal + S_amp * exp(-((t - S_center).^2) / (2*S_width^2));
+    
+    % T-wave (ventricular repolarization)
+    T_center = t_beat + 0.48;
+    T_width = 0.08;
+    T_amp = 0.3;
+    ecg_signal = ecg_signal + T_amp * exp(-((t - T_center).^2) / (2*T_width^2));
+end
+
+% Add baseline wander
+ecg_signal = ecg_signal + 0.05*sin(2*pi*0.5*t);
+
+% Normalize ECG signal
+m_t = ecg_signal / max(abs(ecg_signal));
+
+fprintf('✓ ECG Signal Generated (HR: %d BPM)\n', heart_rate);
+
+%% ================= FM MODULATION (Transmitter) =========================
+% FM Equation: s(t) = Ac * cos(2π*fc*t + 2π*kf*∫m(τ)dτ)
+% Numerical integration using cumulative sum
+
+integral_m = cumsum(m_t) * (1/fs); % Trapezoidal integration
+phase = 2 * pi * kf * integral_m;  % Phase deviation
+fm_signal = Ac * cos(2*pi*fc*t + phase);
+
+fprintf('✓ FM Modulation Applied (fc: %d Hz, kf: %d Hz/V)\n', fc, kf);
+
+%% ================== CHANNEL MODEL (AWGN) ===============================
+signal_power = mean(fm_signal.^2);
+noise_power = signal_power / (10^(SNR_dB/10));
+noise = sqrt(noise_power) * randn(size(fm_signal));
+received_signal = fm_signal + noise;
+
+fprintf('✓ Channel Transmission (AWGN, SNR: %d dB)\n', SNR_dB);
+
+%% ============== FM DEMODULATION (Phase Discriminator Method) ============
+% This is the INDUSTRY STANDARD for high-quality FM demodulation
+% Method: Delay-and-Multiply Phase Discriminator
+
+% Step 1: Pre-filtering - Bandpass filter around carrier
+f_low = fc - 200;  % Lower cutoff
+f_high = fc + 200; % Upper cutoff
+[b_bp, a_bp] = butter(6, [f_low f_high]/(fs/2), 'bandpass');
+received_filtered = filtfilt(b_bp, a_bp, received_signal);
+
+% Step 2: Convert to Analytic Signal (Complex representation)
+analytic = hilbert(received_filtered);
+
+% Step 3: Delay and Multiply Discriminator
+% This extracts instantaneous frequency by computing phase difference
+delay_samples = 1; % One-sample delay
+analytic_delayed = [analytic(1), analytic(1:end-1)];
+
+% Multiply current sample with conjugate of delayed sample
+discriminator_output = analytic .* conj(analytic_delayed);
+
+% Step 4: Extract instantaneous frequency from phase
+% The angle of the product gives the phase difference
+instantaneous_phase_diff = angle(discriminator_output);
+
+% Convert phase difference to frequency deviation
+% Frequency = (phase difference) * fs / (2*pi)
+instantaneous_freq = instantaneous_phase_diff * fs / (2*pi);
+
+% Step 5: Remove carrier frequency to get baseband message
+demodulated_raw = instantaneous_freq;
+
+% Step 6: DC removal (remove any DC offset)
+demodulated_raw = demodulated_raw - mean(demodulated_raw);
+
+% Step 7: Multi-stage Low-Pass Filtering
+% Stage 1: Remove high-frequency noise
+f_cutoff1 = 60; % Hz
+[b1, a1] = butter(5, f_cutoff1/(fs/2), 'low');
+demodulated_stage1 = filtfilt(b1, a1, demodulated_raw);
+
+% Stage 2: Fine ECG bandwidth filter
+f_cutoff2 = 45; % Hz
+[b2, a2] = butter(4, f_cutoff2/(fs/2), 'low');
+demodulated_signal = filtfilt(b2, a2, demodulated_stage1);
+
+% Step 8: Amplitude normalization and scaling
+demodulated_signal = demodulated_signal / max(abs(demodulated_signal));
+demodulated_signal = demodulated_signal * max(abs(m_t));
+
+% Step 9: Fine amplitude adjustment using least squares
+% This compensates for any gain mismatch
+scale_factor = (m_t(:)' * demodulated_signal(:)) / (demodulated_signal(:)' * demodulated_signal(:));
+demodulated_signal = demodulated_signal * scale_factor;
+
+fprintf('✓ FM Demodulation Complete (Phase Discriminator Method)\n');
+
+%% =================== FREQUENCY ANALYSIS (FFT) ==========================
+NFFT = 2^nextpow2(N);
+fm_fft = fft(fm_signal, NFFT);
+fm_fft_magnitude = abs(fm_fft/N);
+fm_fft_magnitude = fm_fft_magnitude(1:NFFT/2+1);
+fm_fft_magnitude(2:end-1) = 2*fm_fft_magnitude(2:end-1);
+f_axis = fs/2*linspace(0, 1, NFFT/2+1);
+
+%% ============= VISUALIZATION (Medical ICU Dashboard) ===================
+figure('Color', 'k', 'Position', [100 100 1400 900], 'Name', 'Medical Telemetry System');
+
+% -------- Subplot 1: Original ECG Signal (Patient Side) ----------------
+subplot(2,2,1);
+plot(t, m_t, 'Color', [0 1 0], 'LineWidth', 2);
+hold on;
+grid on; grid minor;
+xlabel('Time (seconds)', 'Color', 'w', 'FontSize', 11);
+ylabel('Amplitude (mV)', 'Color', 'w', 'FontSize', 11);
+title('📡 PATIENT SIDE: Original ECG Signal', 'Color', 'w', 'FontSize', 13, 'FontWeight', 'bold');
+set(gca, 'Color', [0.1 0.1 0.1], 'XColor', 'w', 'YColor', 'w', 'GridColor', [0.3 0.3 0.3]);
+xlim([0 2.5]); % Show first 2.5 seconds
+ylim([min(m_t)-0.2 max(m_t)+0.3]); % Add padding for visibility
+
+% Annotate QRS Complex
+[~, qrs_idx] = max(m_t(1:floor(fs*beat_period)));
+qrs_time = t(qrs_idx);
+plot(qrs_time, m_t(qrs_idx), 'yo', 'MarkerSize', 10, 'MarkerFaceColor', 'y', 'LineWidth', 2);
+text(qrs_time+0.15, m_t(qrs_idx)+0.15, '← QRS Complex', 'Color', 'yellow', 'FontSize', 11, 'FontWeight', 'bold');
+hold off;
+
+% -------- Subplot 2: Frequency Spectrum (FFT) ---------------------------
+subplot(2,2,2);
+plot(f_axis, fm_fft_magnitude, 'Color', [1 1 0], 'LineWidth', 1.5);
+grid on; grid minor;
+xlabel('Frequency (Hz)', 'Color', 'w', 'FontSize', 11);
+ylabel('Magnitude', 'Color', 'w', 'FontSize', 11);
+title('📊 SPECTRUM: FM Signal Frequency Content', 'Color', 'w', 'FontSize', 13, 'FontWeight', 'bold');
+set(gca, 'Color', [0.1 0.1 0.1], 'XColor', 'w', 'YColor', 'w', 'GridColor', [0.3 0.3 0.3]);
+xlim([0 800]);
+
+% Annotate Carrier Frequency
+[~, fc_idx] = min(abs(f_axis - fc));
+fc_magnitude = fm_fft_magnitude(fc_idx);
+annotation('arrow', [0.72 0.69], [0.85 0.8], 'Color', 'cyan', 'LineWidth', 2);
+text(fc+50, fc_magnitude, sprintf('Carrier: %d Hz ↓', fc), 'Color', 'cyan', 'FontSize', 11, 'FontWeight', 'bold');
+
+% -------- Subplot 3: FM Modulated Signal (Transmission) -----------------
+subplot(2,2,3);
+t_zoom = 0.5; % Zoom to 0.5 seconds to show frequency variations
+idx_zoom = t <= t_zoom;
+plot(t(idx_zoom), fm_signal(idx_zoom), 'Color', [0 1 1], 'LineWidth', 1);
+grid on; grid minor;
+xlabel('Time (seconds)', 'Color', 'w', 'FontSize', 11);
+ylabel('Amplitude', 'Color', 'w', 'FontSize', 11);
+title('📶 TRANSMISSION: FM Modulated Signal (Zoomed)', 'Color', 'w', 'FontSize', 13, 'FontWeight', 'bold');
+set(gca, 'Color', [0.1 0.1 0.1], 'XColor', 'w', 'YColor', 'w', 'GridColor', [0.3 0.3 0.3]);
+text(0.05, 0.8, '← Frequency varies with ECG', 'Color', 'yellow', 'FontSize', 10, 'Units', 'normalized');
+
+% -------- Subplot 4: Demodulated Signal (Doctor Side) ------------------
+subplot(2,2,4);
+hold on;
+plot(t, m_t, 'Color', [0.5 0.5 0.5], 'LineWidth', 2, 'DisplayName', 'Original Sent');
+plot(t, demodulated_signal, 'Color', [1 0.3 0.3], 'LineWidth', 1.5, 'DisplayName', 'Recovered Received');
+grid on; grid minor;
+xlabel('Time (seconds)', 'Color', 'w', 'FontSize', 11);
+ylabel('Amplitude (mV)', 'Color', 'w', 'FontSize', 11);
+title('🏥 DOCTOR SIDE: Recovered ECG Signal', 'Color', 'w', 'FontSize', 13, 'FontWeight', 'bold');
+legend('Location', 'northeast', 'TextColor', 'w', 'Color', [0.2 0.2 0.2]);
+set(gca, 'Color', [0.1 0.1 0.1], 'XColor', 'w', 'YColor', 'w', 'GridColor', [0.3 0.3 0.3]);
+xlim([0 2.5]);
+ylim([min(m_t)-0.2 max(m_t)+0.3]); % Match y-axis to original signal
+hold off;
+
+% -------- Status Box Annotation -----------------------------------------
+annotation('textbox', [0.42 0.48 0.16 0.06], 'String', sprintf('STATUS: %s\nHR: %d BPM', status, heart_rate), ...
+    'Color', color_status, 'FontSize', 14, 'FontWeight', 'bold', 'BackgroundColor', [0.1 0.1 0.1], ...
+    'EdgeColor', color_status, 'LineWidth', 3, 'HorizontalAlignment', 'center');
+
+fprintf('\n✓ Visualization Complete - Medical Dashboard Generated\n');
+
+%% =================== AUDIO ALARM (Emergency Case) ======================
+if alarm_flag
+    fprintf('\n⚠️  CRITICAL CONDITION DETECTED! Activating Audio Alarm...\n');
+    
+    % Generate pulsating alarm sound
+    alarm_duration = 2; % seconds
+    t_alarm = 0:1/fs:alarm_duration-1/fs;
+    alarm_freq = 800; % Hz (typical medical alarm frequency)
+    
+    % Create pulsating effect (3 beeps)
+    pulse_envelope = zeros(size(t_alarm));
+    for i = 0:2
+        pulse_start = i * 0.6;
+        pulse_end = pulse_start + 0.2;
+        pulse_idx = (t_alarm >= pulse_start) & (t_alarm <= pulse_end);
+        pulse_envelope(pulse_idx) = 1;
+    end
+    
+    alarm_signal = 0.5 * sin(2*pi*alarm_freq*t_alarm) .* pulse_envelope;
+    sound(alarm_signal, fs);
+    
+    fprintf('>>> Alarm Sound Playing (800 Hz pulsating beep)\n');
+end
+
+%% =================== PERFORMANCE METRICS ===============================
+% Calculate correlation between original and recovered signals
+correlation = corrcoef(m_t, demodulated_signal);
+similarity = correlation(1,2) * 100;
+
+% Calculate SNR of recovered signal
+signal_power_recovered = mean(m_t.^2);
+noise_recovered = demodulated_signal - m_t;
+noise_power_recovered = mean(noise_recovered.^2);
+SNR_recovered = 10*log10(signal_power_recovered / noise_power_recovered);
+
+fprintf('\n╔════════════════════════════════════════════════════════════╗\n');
+fprintf('║                 SYSTEM PERFORMANCE METRICS                 ║\n');
+fprintf('╠════════════════════════════════════════════════════════════╣\n');
+fprintf('║  Signal Similarity:         %.2f%%                      ║\n', similarity);
+fprintf('║  Recovered SNR:             %.2f dB                     ║\n', SNR_recovered);
+fprintf('║  Carrier Frequency:         %d Hz                       ║\n', fc);
+fprintf('║  Frequency Deviation:       %.2f Hz                    ║\n', kf*max(abs(m_t)));
+fprintf('║  Transmission Channel:      AWGN (%d dB)                ║\n', SNR_dB);
+fprintf('╚════════════════════════════════════════════════════════════╝\n\n');
+
+fprintf('>>> Telemetry System Simulation Complete! ✓\n\n');
